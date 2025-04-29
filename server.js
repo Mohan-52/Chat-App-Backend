@@ -8,6 +8,21 @@ const jwt = require("jsonwebtoken");
 const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
 
+/* const { createServer } = require("http");
+const { Server } = require("socket.io");
+
+const httpServer = createServer(app);
+
+const io = new Server(httpServer);
+
+io.on("connection", (socket) => {
+  // ...
+});
+
+httpServer.listen(3000); */
+
+const defaultAvatarUrl =
+  "https://res.cloudinary.com/dr2f4tmgc/image/upload/v1745903350/20171206_01_yj5lwe.jpg";
 app.use(express.json());
 app.use(cors());
 require("dotenv").config();
@@ -33,7 +48,7 @@ async function initServerAndDb() {
 initServerAndDb();
 
 app.post("/signup", async (req, res) => {
-  const { username, password, avatarurl } = req.body;
+  const { username, password, avatarurl = defaultAvatarUrl } = req.body;
   try {
     const existing = await db.get("SELECT * FROM users WHERE username = ?", [
       username,
