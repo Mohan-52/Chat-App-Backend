@@ -64,6 +64,7 @@ const defaultAvatarUrl =
   "https://res.cloudinary.com/dr2f4tmgc/image/upload/v1745903350/20171206_01_yj5lwe.jpg";
 app.use(express.json());
 app.use(cors());
+app.use(cors({ origin: "*" }));
 
 require("dotenv").config();
 
