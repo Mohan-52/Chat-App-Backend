@@ -7,24 +7,64 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
+const { error } = require("console");
 
-/* const { createServer } = require("http");
 const { Server } = require("socket.io");
-
-const httpServer = createServer(app);
-
-const io = new Server(httpServer);
-
-io.on("connection", (socket) => {
-  // ...
+const io = new Server(3001, {
+  cors: {
+    origin: "*",
+  },
 });
 
-httpServer.listen(3000); */
+const connectedUsers = {};
+
+io.on("connection", (socket) => {
+  console.log("A user connected:", socket.id);
+
+  // Handle user joining with their userId (sent after login)
+  socket.on("register", (userId) => {
+    connectedUsers[userId] = socket.id;
+    console.log(`User ${userId} registered with socket ${socket.id}`);
+  });
+
+  // Handle sending message
+  socket.on("send_message", async (data) => {
+    const { senderId, receiverId, message } = data;
+    const timestamp = getTimeStamp();
+
+    // Save message to DB (optional but recommended)
+    await db.run(
+      "INSERT INTO messages (id, sender_id, conversation_id, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+      [uuidv4(), senderId, receiverId, message, timestamp]
+    );
+
+    // Send to receiver if online
+    const receiverSocketId = connectedUsers[receiverId];
+    if (receiverSocketId) {
+      io.to(receiverSocketId).emit("receive_message", {
+        senderId,
+        message,
+        timestamp,
+      });
+    }
+  });
+
+  socket.on("disconnect", () => {
+    for (const [userId, sId] of Object.entries(connectedUsers)) {
+      if (sId === socket.id) {
+        delete connectedUsers[userId];
+        console.log(`User ${userId} disconnected`);
+        break;
+      }
+    }
+  });
+});
 
 const defaultAvatarUrl =
   "https://res.cloudinary.com/dr2f4tmgc/image/upload/v1745903350/20171206_01_yj5lwe.jpg";
 app.use(express.json());
 app.use(cors());
+
 require("dotenv").config();
 
 const dbPath = path.join(__dirname, "chatbox.db");
@@ -151,10 +191,18 @@ app.post("/createroom", authenticateToken, async (req, res) => {
   }
 });
 
-app.get("/rooms", authenticateToken, async (req, res) => {
+app.get("/dashboard", authenticateToken, async (req, res) => {
+  const { userId } = req;
   try {
-    const dbResponse = await db.all(`SELECT * FROM rooms`);
-    res.status(200).send(dbResponse);
+    const rooms = await db.all(`SELECT * FROM rooms`);
+    const users = await db.all(
+      `SELECT id, username, avatarurl, status FROM users WHERE id !=?`,
+      [userId]
+    );
+    res.status(200).send({
+      publicRooms: rooms,
+      users,
+    });
   } catch (error) {
     console.log(error);
     res.status(500).send({ message: "Internal Server Error" });
