@@ -14,7 +14,7 @@ const app = express();
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*", // change to your frontend URL in production
+    origin: "*", // Replace with frontend URL in production
   },
 });
 
@@ -27,21 +27,42 @@ const defaultAvatarUrl =
 const dbPath = path.join(__dirname, "chatbox.db");
 let db;
 
-// ==============================
-// SQLite DB INIT
-// ==============================
 async function initDb() {
   db = await open({
     filename: dbPath,
     driver: sqlite3.Database,
   });
+
+  // Create tables if not exist
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      username TEXT UNIQUE,
+      password TEXT,
+      avatarurl TEXT,
+      status TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      sender_id TEXT,
+      receiver_id TEXT,
+      message_text TEXT,
+      timestamp TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS rooms (
+      id TEXT PRIMARY KEY,
+      name TEXT UNIQUE,
+      created_at TEXT,
+      created_by TEXT
+    );
+  `);
 }
 initDb();
 
-// ==============================
-// Socket.io logic
-// ==============================
-const connectedUsers = {};
+const connectedUsers = {}; // userId => socket.id
+const typingUsers = {}; // { receiverId: Set<userId> }
 
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
@@ -51,21 +72,38 @@ io.on("connection", (socket) => {
     console.log(`User ${userId} registered with socket ${socket.id}`);
   });
 
-  socket.on("send_message", async ({ senderId, receiverId, message }) => {
+  socket.on("send_message", async (data) => {
+    const { senderId, receiverId, message } = data;
     const timestamp = getTimeStamp();
+    const id = uuidv4();
 
-    await db.run(
-      "INSERT INTO messages (id, sender_id, conversation_id, content, timestamp) VALUES (?, ?, ?, ?, ?)",
-      [uuidv4(), senderId, receiverId, message, timestamp]
-    );
+    try {
+      await db.run(
+        `INSERT INTO messages (id, sender_id, receiver_id, message_text, timestamp)
+         VALUES (?, ?, ?, ?, ?)`,
+        [id, senderId, receiverId, message, timestamp]
+      );
 
-    const receiverSocket = connectedUsers[receiverId];
-    if (receiverSocket) {
-      io.to(receiverSocket).emit("receive_message", {
-        senderId,
+      const receiverSocketId = connectedUsers[receiverId];
+      if (receiverSocketId) {
+        io.to(receiverSocketId).emit("receive_message", {
+          id,
+          senderId,
+          receiverId,
+          message,
+          timestamp,
+        });
+      }
+
+      socket.emit("message_sent", {
+        id,
+        receiverId,
         message,
         timestamp,
       });
+    } catch (err) {
+      console.error("Error saving message:", err);
+      socket.emit("error_message", { error: "Failed to send message." });
     }
   });
 
@@ -76,6 +114,30 @@ io.on("connection", (socket) => {
         console.log(`User ${userId} disconnected`);
         break;
       }
+    }
+  });
+
+  // In-memory tracking
+
+  socket.on("typing", ({ senderId, receiverId }) => {
+    if (!typingUsers[receiverId]) typingUsers[receiverId] = new Set();
+    typingUsers[receiverId].add(senderId);
+
+    const receiverSocketId = connectedUsers[receiverId];
+    if (receiverSocketId) {
+      io.to(receiverSocketId).emit("user_typing", { senderId });
+    }
+  });
+
+  socket.on("stop_typing", ({ senderId, receiverId }) => {
+    if (typingUsers[receiverId]) {
+      typingUsers[receiverId].delete(senderId);
+      if (typingUsers[receiverId].size === 0) delete typingUsers[receiverId];
+    }
+
+    const receiverSocketId = connectedUsers[receiverId];
+    if (receiverSocketId) {
+      io.to(receiverSocketId).emit("user_stopped_typing", { senderId });
     }
   });
 });
@@ -96,7 +158,7 @@ function authenticateToken(req, res, next) {
 }
 
 // ==============================
-// API Routes
+// Routes
 // ==============================
 
 app.post("/signup", async (req, res) => {
@@ -175,15 +237,36 @@ app.post("/createroom", authenticateToken, async (req, res) => {
       [id, name, createdAt, userId]
     );
 
-    res.status(201).send({ message: "Room created!" });
+    res.status(201).send({ message: "Room created!", roomId: id });
   } catch (err) {
     console.error(err);
     res.status(500).send({ message: "Something went wrong." });
   }
 });
 
+// ✅ Get messages for a conversation
+app.get("/messages/:receiverId", authenticateToken, async (req, res) => {
+  const { userId } = req;
+  const { receiverId } = req.params;
+
+  try {
+    const messages = await db.all(
+      `SELECT * FROM messages
+       WHERE (sender_id = ? AND receiver_id = ?)
+       OR (sender_id = ? AND receiver_id = ?)
+       ORDER BY timestamp ASC`,
+      [userId, receiverId, receiverId, userId]
+    );
+
+    res.status(200).send(messages);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Internal Server Error" });
+  }
+});
+
 // ==============================
-// Utilities
+// Utils
 // ==============================
 function getTimeStamp() {
   const now = new Date();
@@ -198,8 +281,8 @@ function getTimeStamp() {
 }
 
 // ==============================
-// Server Start
+// Server
 // ==============================
 server.listen(4004, () => {
-  console.log("Server is running on http://localhost:4004");
+  console.log("Server running on http://localhost:4004");
 });
