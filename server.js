@@ -244,7 +244,7 @@ app.post("/createroom", authenticateToken, async (req, res) => {
   }
 });
 
-// ✅ Get messages for a conversation
+//  Get messages for a conversation
 app.get("/messages/:receiverId", authenticateToken, async (req, res) => {
   const { userId } = req;
   const { receiverId } = req.params;
@@ -261,6 +261,25 @@ app.get("/messages/:receiverId", authenticateToken, async (req, res) => {
     res.status(200).send(messages);
   } catch (err) {
     console.error(err);
+    res.status(500).send({ message: "Internal Server Error" });
+  }
+});
+
+// Create Message
+
+app.post("/send-message", authenticateToken, async (req, res) => {
+  const { senderId, receiverId, messageText } = req.body;
+  const timestamp = getTimeStamp();
+  const id = uuidv4();
+
+  try {
+    await db.run(
+      `INSERT INTO messages (id, sender_id, receiver_id, message_text, timestamp) VALUES (?, ?, ?, ?, ?)`,
+      [id, senderId, receiverId, messageText, timestamp]
+    );
+    res.status(200).send({ message: "Successfully Message Sent" });
+  } catch (error) {
+    console.error("Error inserting message:", error);
     res.status(500).send({ message: "Internal Server Error" });
   }
 });
