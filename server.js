@@ -32,32 +32,6 @@ async function initDb() {
     filename: dbPath,
     driver: sqlite3.Database,
   });
-
-  // Create tables if not exist
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      username TEXT UNIQUE,
-      password TEXT,
-      avatarurl TEXT,
-      status TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY,
-      sender_id TEXT,
-      receiver_id TEXT,
-      message_text TEXT,
-      timestamp TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS rooms (
-      id TEXT PRIMARY KEY,
-      name TEXT UNIQUE,
-      created_at TEXT,
-      created_by TEXT
-    );
-  `);
 }
 initDb();
 
@@ -70,6 +44,11 @@ io.on("connection", (socket) => {
   socket.on("register", (userId) => {
     connectedUsers[userId] = socket.id;
     console.log(`User ${userId} registered with socket ${socket.id}`);
+  });
+
+  socket.on("join_room", (roomId) => {
+    socket.join(roomId);
+    console.log(`Socket ${socket.id} joined room ${roomId}`);
   });
 
   socket.on("send_message", async (data) => {
@@ -93,10 +72,13 @@ io.on("connection", (socket) => {
           message,
           timestamp,
         });
+      } else {
+        console.log(`Receiver ${receiverId} is not connected.`);
       }
 
       socket.emit("message_sent", {
         id,
+        senderId,
         receiverId,
         message,
         timestamp,
@@ -104,6 +86,46 @@ io.on("connection", (socket) => {
     } catch (err) {
       console.error("Error saving message:", err);
       socket.emit("error_message", { error: "Failed to send message." });
+    }
+  });
+
+  socket.on("send_room_message", async (data) => {
+    const { senderId, roomId, message } = data;
+    const timestamp = getTimeStamp();
+    const id = uuidv4();
+
+    try {
+      const user = await db.get("SELECT username FROM users WHERE id = ?", [
+        senderId,
+      ]);
+      if (!user) throw new Error("User not found");
+
+      await db.run(
+        `INSERT INTO room_messages (id, room_id, sender_id, message_text, timestamp)
+         VALUES (?, ?, ?, ?, ?)`,
+        [id, roomId, senderId, message, timestamp]
+      );
+
+      io.to(roomId).emit("room_message", {
+        id,
+        roomId,
+        senderId,
+        sender_name: user.username,
+        message,
+        timestamp,
+      });
+
+      socket.emit("room_message_sent", {
+        id,
+        roomId,
+        senderId,
+        sender_name: user.username,
+        message,
+        timestamp,
+      });
+    } catch (err) {
+      console.error("Error saving room message:", err);
+      socket.emit("error_message", { error: "Failed to send room message." });
     }
   });
 
@@ -116,8 +138,6 @@ io.on("connection", (socket) => {
       }
     }
   });
-
-  // In-memory tracking
 
   socket.on("typing", ({ senderId, receiverId }) => {
     if (!typingUsers[receiverId]) typingUsers[receiverId] = new Set();
@@ -142,9 +162,7 @@ io.on("connection", (socket) => {
   });
 });
 
-// ==============================
 // JWT Middleware
-// ==============================
 function authenticateToken(req, res, next) {
   const authHeader = req.headers["authorization"];
   if (!authHeader) return res.status(400).send({ message: "Missing token" });
@@ -157,10 +175,7 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// ==============================
 // Routes
-// ==============================
-
 app.post("/signup", async (req, res) => {
   const { username, password, avatarurl = defaultAvatarUrl } = req.body;
 
@@ -244,7 +259,6 @@ app.post("/createroom", authenticateToken, async (req, res) => {
   }
 });
 
-//  Get messages for a conversation
 app.get("/messages/:receiverId", authenticateToken, async (req, res) => {
   const { userId } = req;
   const { receiverId } = req.params;
@@ -265,28 +279,33 @@ app.get("/messages/:receiverId", authenticateToken, async (req, res) => {
   }
 });
 
-// Create Message
-
-app.post("/send-message", authenticateToken, async (req, res) => {
-  const { senderId, receiverId, messageText } = req.body;
-  const timestamp = getTimeStamp();
-  const id = uuidv4();
+app.get("/room-messages/:roomId", authenticateToken, async (req, res) => {
+  const { roomId } = req.params;
 
   try {
-    await db.run(
-      `INSERT INTO messages (id, sender_id, receiver_id, message_text, timestamp) VALUES (?, ?, ?, ?, ?)`,
-      [id, senderId, receiverId, messageText, timestamp]
+    const messages = await db.all(
+      `SELECT 
+         rm.id,
+         rm.room_id,
+         rm.sender_id,
+         u.username AS sender_name,
+         rm.message_text,
+         rm.timestamp
+       FROM room_messages rm
+       JOIN users u ON rm.sender_id = u.id
+       WHERE rm.room_id = ?
+       ORDER BY rm.timestamp ASC`,
+      [roomId]
     );
-    res.status(200).send({ message: "Successfully Message Sent" });
-  } catch (error) {
-    console.error("Error inserting message:", error);
+
+    res.status(200).send(messages);
+  } catch (err) {
+    console.error(err);
     res.status(500).send({ message: "Internal Server Error" });
   }
 });
 
-// ==============================
 // Utils
-// ==============================
 function getTimeStamp() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(
@@ -299,9 +318,7 @@ function getTimeStamp() {
   ).padStart(2, "0")}`;
 }
 
-// ==============================
 // Server
-// ==============================
 server.listen(4004, () => {
   console.log("Server running on http://localhost:4004");
 });
